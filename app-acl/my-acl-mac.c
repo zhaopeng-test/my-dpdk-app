@@ -144,6 +144,8 @@ int main(int argc, void **argv)
 	uint32_t mac1 = 0;
 	uint8_t *pm = &mac1;
 	memcpy(&mac0, &net_mac_order[2], sizeof(mac0));
+	//think net mac order is 0x00 0x00 0x11 0x22 0x33 0x44 0x55 0x66
+	//may copy from 0x00 0x00 0x11 0x22
 	memcpy(&pm[2], &net_mac_order[0], 2);
 
 	printf("mac0 0x%x mac1 0x%x\n", mac0, mac1);
