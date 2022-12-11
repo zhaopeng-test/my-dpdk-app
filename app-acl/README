@@ -1,0 +1,5 @@
+0. build dpdk lib
+1. export PKG_CONFIG_PATH=<libdpdk.pc>
+2. meson build
+3. ninja -C build
+
