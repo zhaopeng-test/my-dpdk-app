@@ -1,0 +1,191 @@
+#include <linux/if.h>
+#include <linux/if_tun.h>
+#include <stdio.h>
+#include <rte_common.h> 
+#include <rte_eal.h> 
+#include <sys/ioctl.h>
+#include <sys/queue.h>
+#include <string.h>
+#include <stdint.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+
+#include <rte_mbuf.h>
+#include <rte_malloc.h>
+#include <rte_port_fd.h>
+#include <rte_port.h>
+
+#define TAP_DEV          "/dev/net/tun"
+#define NAME_SIZE          64
+
+struct tap {
+	TAILQ_ENTRY(tap) node;
+	char name[NAME_SIZE];
+	int fd;
+};
+
+TAILQ_HEAD(tap_list, tap);
+
+static struct tap_list tap_list;
+
+extern struct rte_port_in_ops rte_port_fd_reader_ops;
+
+int
+tap_init(void)
+{
+	TAILQ_INIT(&tap_list);
+
+	return 0;
+}
+
+struct tap *
+tap_find(const char *name)
+{
+	struct tap *tap;
+
+	if (name == NULL)
+		return NULL;
+
+	TAILQ_FOREACH(tap, &tap_list, node)
+		if (strcmp(tap->name, name) == 0)
+			return tap;
+
+	return NULL;
+}
+
+struct tap *
+tap_create(const char *name)
+{
+	struct tap *tap;
+	struct ifreq ifr;
+	int fd, status;
+
+	/* Check input params */
+	if ((name == NULL) ||
+		tap_find(name))
+		return NULL;
+
+	/* Resource create */
+	fd = open(TAP_DEV, O_RDWR | O_NONBLOCK);
+	if (fd < 0)
+		return NULL;
+
+	memset(&ifr, 0, sizeof(ifr));
+	ifr.ifr_flags = IFF_TAP | IFF_NO_PI; /* No packet information */
+	strlcpy(ifr.ifr_name, name, IFNAMSIZ);
+
+	status = ioctl(fd, TUNSETIFF, (void *) &ifr);
+	if (status < 0) {
+		close(fd);
+		return NULL;
+	}
+
+	/* Node allocation */
+	tap = calloc(1, sizeof(struct tap));
+	if (tap == NULL) {
+		close(fd);
+		return NULL;
+	}
+	/* Node fill in */
+	strlcpy(tap->name, name, sizeof(tap->name));
+	tap->fd = fd;
+
+	/* Node add to list */
+	TAILQ_INSERT_TAIL(&tap_list, tap, node);
+
+	return tap;
+}
+
+#define POOL_SIZE           (32 * 1024)
+#define POOL_CACHE_SIZE     256
+#define POOL_BUFFER_SIZE    RTE_MBUF_DEFAULT_BUF_SIZE
+
+static struct rte_mempool *pool;
+
+static void
+app_init_mbuf_pools(void)
+{
+	/* Init the buffer pool */
+	printf("Getting/Creating the mempool ...\n");
+
+    pool = rte_pktmbuf_pool_create(
+        "mempool",
+        POOL_SIZE,
+        POOL_CACHE_SIZE, 0, POOL_BUFFER_SIZE,
+        0);
+
+    if (pool == NULL)
+        rte_panic("Cannot create mbuf pool\n");
+}
+
+struct rte_port_in_ops *g_port_ops;
+#define TAP_NAME "tap0"
+struct rte_port_fd_reader *g_port;
+
+int port_init(void)
+{
+    struct rte_port_fd_reader_params params = {0};
+    struct tap *ptap = NULL;
+
+    ptap = tap_find(TAP_NAME);
+    if (NULL == ptap){
+        printf("not find tap %s\n", TAP_NAME);
+        return -1;
+    }
+
+    params.fd = ptap->fd;
+    params.mtu = 1500;
+
+    app_init_mbuf_pools();
+
+    params.mempool = pool;
+
+    g_port_ops = rte_port_fd_reader_ops;
+
+    g_port = g_port_ops->f_create(&params, 0);
+
+    return 0;
+}
+
+int rcv_pkts()
+{
+    uint32_t n_pkts;
+    struct rte_mbuf *pkts[64] = {0};
+    uint32_t i = 0;
+
+	/* Input port RX */
+	n_pkts = g_port_ops->f_rx(g_port, pkts,
+		64);
+
+    printf("rcv num pkts %d\n", n_pkts);
+    for (i = 0; i < n_pkts; i ++)
+        rte_pktmbuf_free(pkts[i]);
+
+    return 0;
+}
+
+int main(int argc, char **argv)
+{
+    int ret = 0;
+
+    ret = rte_eal_init(argc, argv);
+    if (0 != ret){
+        printf("rte_eal_init failed ret %d\n", ret);
+        return -1;
+    }
+
+    tap_create(TAP_NAME);
+    printf("tap create\n");
+    port_init();
+    printf("port init\n");
+    for (; ;){
+        printf("start rcv pkts");
+        rcv_pkts();
+        sleep(1);
+    }
+
+    return 0;
+
+}
